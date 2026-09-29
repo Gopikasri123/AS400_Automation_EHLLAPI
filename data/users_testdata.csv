@@ -1,0 +1,3 @@
+test_id,run,description,user_id,user_name,email,city,phone,update_city,update_phone
+# run=Y executes the row, run=N keeps it in the file but skips it. Use a USER_ID that does not exist yet.,,,,,,,,
+TC_USR_10,Y,Full CRUD lifecycle for a new user,1010,Test User,test.user10@example.com,Coimbatore,7329072571,Erode,7329091993
