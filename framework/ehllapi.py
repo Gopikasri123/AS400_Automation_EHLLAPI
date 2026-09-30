@@ -8,8 +8,11 @@ Notes
 -----
 * This attaches to an ACS 5250 session that is ALREADY OPEN; it does not launch
   the emulator.
-* Presentation-space geometry (24x80 vs 27x132) is detected at connect time via
-  Query Session Status (22), so the rest of the framework never hardcodes a size.
+* Presentation-space geometry (24x80 vs 27x132) is re-detected via Query
+  Session Status (22) on every screen read, because some screens (STRSQL's
+  'Display Data') switch the session to 27x132 on the fly. Copy PS always gets a
+  buffer big enough for the largest display: an undersized buffer lets the DLL
+  write past it and crash Python with an access violation.
 """
 import ctypes
 import os
@@ -35,6 +38,10 @@ SET_CURSOR         = 40
 
 RC_OK = 0
 RC_KEYBOARD_INHIBITED = 5
+
+# (rows, cols) of every IBM i display size; Copy PS buffers fit the largest.
+KNOWN_SIZES = ((24, 80), (27, 132), (43, 80))
+MAX_PS_SIZE = max(r * c for r, c in KNOWN_SIZES)
 
 
 class EhllapiSession:
@@ -70,7 +77,9 @@ class EhllapiSession:
               ) -> Tuple[bytes, int, int]:
         length = len(data) if length is None else length
         func_p = c_int(func)
-        buf = create_string_buffer(data, max(length, 1))
+        # Headroom: some functions write more than 'length' (e.g. the Enhanced
+        # Query Session Status layout), and an overrun corrupts the heap.
+        buf = create_string_buffer(data, max(length, len(data)) + 256)
         len_p = c_int(length)
         rc_p = c_int(0)
         self._api(byref(func_p), buf, byref(len_p), byref(rc_p))
@@ -107,7 +116,7 @@ class EhllapiSession:
         self._call(SET_SESSION_PARMS, parms.encode("latin-1"))
 
     # -------------------------------------------------------------- geometry
-    def _detect_size(self, short_name: str) -> None:
+    def _detect_size(self, short_name: str) -> bool:
         # Query Session Status (22) returns rows/cols, but the field offsets differ
         # between the Standard and Enhanced EHLLAPI layouts, and endianness varies
         # by build. Rather than trust one layout, try the known ones and accept the
@@ -116,18 +125,28 @@ class EhllapiSession:
         data = short_name.encode("latin-1") + b"\x00" * 23
         raw, _, rc = self._call(QUERY_SESSION_STAT, data, 24)
         if rc != RC_OK or len(raw) < 18:
-            return
-        valid_rows, valid_cols = (24, 27, 43), (80, 132)
+            return False
         for r_off, c_off in ((11, 13), (14, 16)):        # Standard, then Enhanced
             for endian in ("little", "big"):
                 r = int.from_bytes(raw[r_off:r_off + 2], endian)
                 c = int.from_bytes(raw[c_off:c_off + 2], endian)
-                if r in valid_rows and c in valid_cols:
-                    self.rows, self.cols, self.ps_size = r, c, r * c
-                    return
+                if (r, c) in KNOWN_SIZES:
+                    self._set_size(r, c)
+                    return True
         if self.trace:
             log.info("size autodetect inconclusive (raw=%s); keeping %dx%d",
                      raw[:20].hex(), self.rows, self.cols)
+        return False
+
+    def _set_size(self, rows: int, cols: int) -> None:
+        if (rows, cols) != (self.rows, self.cols) and self._connected_to:
+            log.info("screen size changed %dx%d -> %dx%d",
+                     self.rows, self.cols, rows, cols)
+        self.rows, self.cols, self.ps_size = rows, cols, rows * cols
+
+    def _refresh_size(self) -> None:
+        if self.autodetect and self._connected_to:
+            self._detect_size(self._connected_to)
 
     # ----------------------------------------------------------------- input
     def send(self, keys: str) -> None:
@@ -151,14 +170,24 @@ class EhllapiSession:
         return self._call(WAIT)[2]
 
     def cursor_rc(self) -> Optional[Tuple[int, int]]:
+        self._refresh_size()
         _, pos, rc = self._call(QUERY_CURSOR)
         if rc == RC_OK and pos > 0 and self.cols:
             return ((pos - 1) // self.cols + 1, (pos - 1) % self.cols + 1)
         return None
 
     def screen_rows(self) -> List[str]:
-        raw, ln, _ = self._call(COPY_PS, b"", self.ps_size)
-        text = raw[:ln].decode("latin-1", errors="replace")
+        self._refresh_size()
+        raw, _, _ = self._call(COPY_PS, b"", MAX_PS_SIZE)
+        # If status did not report a mode switch, infer it from how much the DLL
+        # actually wrote into the (zero-filled) buffer.
+        written = len(raw.rstrip(b"\x00"))
+        if written > self.ps_size:
+            for r, c in sorted(KNOWN_SIZES, key=lambda rc: rc[0] * rc[1]):
+                if r * c >= written:
+                    self._set_size(r, c)
+                    break
+        text = raw[:self.ps_size].decode("latin-1", errors="replace")
         return [text[i * self.cols:(i + 1) * self.cols] for i in range(self.rows)]
 
     def screen_text(self) -> str:

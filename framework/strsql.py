@@ -132,22 +132,25 @@ class StrSql:
     def _read_display_data(self):
         """Return (column names, rows) from the 'Display Data' screen.
 
-        The screen shows 79 data positions at a time; wider results are read by
+        The screen shows (cols - 1) data positions at a time (79 at 24x80, 131
+        once STRSQL switches the session to 27x132); wider results are read by
         typing successive offsets into 'Shift to column' and stitching.
         """
         width = self._data_width()
-        count = self._data_row_count(self.s.screen_rows())
+        rows = self.s.screen_rows()          # also refreshes the session geometry
+        count = self._data_row_count(rows)
+        span = self.s.cols - 1
         header, lines = "", [""] * count
         start = 1
         while True:
-            rows = self.s.screen_rows()
-            header += rows[4][1:80].ljust(79)             # screen row 5 = headings
+            header += rows[4][1:span + 1].ljust(span)             # row 5 = headings
             for i in range(count):
-                lines[i] += rows[5 + i][1:80].ljust(79)    # rows 6.. = data
-            start += 79
+                lines[i] += rows[5 + i][1:span + 1].ljust(span)   # rows 6.. = data
+            start += span
             if start > width:
                 break
             self.s.send(TAB + ERASE_EOF + str(start) + ENTER)   # 'Shift to column'
+            rows = self.s.screen_rows()
         header, lines = header[:width], [ln[:width] for ln in lines]
         return self._parse(header, lines)
 
@@ -157,11 +160,15 @@ class StrSql:
 
     @staticmethod
     def _data_row_count(rows: List[str]) -> int:
-        """Data rows sit between the headings and '*** End of data ***'."""
-        for i, row in enumerate(rows[5:21]):
+        """Data rows sit between the headings and '*** End of data ***'.
+
+        The last three screen rows hold the function keys and messages.
+        """
+        last = len(rows) - 3
+        for i, row in enumerate(rows[5:last]):
             if "End of data" in row:
                 return i
-        return 21 - 5          # a full page; only the first page is read
+        return last - 5        # a full page; only the first page is read
 
     @staticmethod
     def _parse(header: str, lines: List[str]):
