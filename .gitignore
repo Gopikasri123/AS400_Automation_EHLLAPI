@@ -1,0 +1,22 @@
+node_modules/
+playwright-report/
+monocart-report/
+test-results/
+# Runs with TEST_ENV other than qa write to <folder>-<env>
+playwright-report-*/
+monocart-report-*/
+test-results-*/
+blob-report/
+playwright/.cache/
+# Timestamped reports of each run: reports/GEP_Report_<date>_<time>/ (html/ and monocart/)
+reports/
+
+# Local secrets (passwords, DB connection)
+.env
+
+# Saved login session (SIGN_IN_ONCE) and shared Chrome profile (CHROME_PROFILE): both hold login cookies
+.auth/
+.chrome-profile/
+
+# Python cache (AS400 scenarios)
+__pycache__/

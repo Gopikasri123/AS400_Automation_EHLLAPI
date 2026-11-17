@@ -1,0 +1,29 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test logs
+*.log
+
+# Generated reports
+reports/*
+!reports/.gitkeep
+# Nuitka build output
+build/
+dist/
+nuitka-crash-report.xml
+
+# Wheel build output
+*.egg-info/

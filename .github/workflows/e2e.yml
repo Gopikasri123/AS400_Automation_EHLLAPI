@@ -1,0 +1,104 @@
+# Runs the GEP Playwright tests on the QA/UAT sites, started by hand (Actions > E2E tests > Run workflow).
+# Every GEP test places a REAL order, so this never runs on push. Settings come from the form below and
+# from the repository secrets (Settings > Secrets and variables > Actions); .env is never used here.
+name: E2E tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_env:
+        description: Environment
+        type: choice
+        options: [qa, uat]
+        default: qa
+      market:
+        description: 'Market(s): us | uk-dental | uk-medical (comma-separated for several)'
+        type: string
+        default: us
+      tests:
+        description: 'Only tests matching this text, e.g. GEP2-36899 or @recurring (empty = all)'
+        type: string
+        default: ''
+      sign_in_once:
+        description: Sign in once per market instead of in every test (SIGN_IN_ONCE)
+        type: boolean
+        default: true
+
+# The tests share one account and cart per market: never let two runs overlap.
+concurrency:
+  group: gep-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TEST_ENV: ${{ inputs.test_env }}
+      MARKET: ${{ inputs.market }}
+      SIGN_IN_ONCE: ${{ inputs.sign_in_once }}
+      HEADLESS: 'true'
+      TIMEOUT: '90000'
+      # Test data database. Leave these secrets unset to use the QA fallback logins below instead.
+      DB_SERVER: ${{ secrets.DB_SERVER }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_ENCRYPTION_KEY: ${{ secrets.DB_ENCRYPTION_KEY }}
+      # QA fallback logins (used when the database is not set or not reachable)
+      US_QA_APP_USERNAME: ${{ secrets.US_QA_APP_USERNAME }}
+      US_QA_APP_PASSWORD: ${{ secrets.US_QA_APP_PASSWORD }}
+      UK_DENTAL_QA_APP_USERNAME: ${{ secrets.UK_DENTAL_QA_APP_USERNAME }}
+      UK_DENTAL_QA_APP_PASSWORD: ${{ secrets.UK_DENTAL_QA_APP_PASSWORD }}
+      UK_MEDICAL_QA_APP_USERNAME: ${{ secrets.UK_MEDICAL_QA_APP_USERNAME }}
+      UK_MEDICAL_QA_APP_PASSWORD: ${{ secrets.UK_MEDICAL_QA_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run the tests
+        env:
+          TESTS: ${{ inputs.tests }}
+        # --retries=0: a retry would place a second real order.
+        run: |
+          if [ -n "$TESTS" ]; then
+            npx playwright test --retries=0 --grep "$TESTS"
+          else
+            npx playwright test --retries=0
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          f=$(ls test-results*/results.json 2>/dev/null | head -1)
+          [ -z "$f" ] && { echo "No results.json found." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          node -e '
+            const r = require(process.argv[1]); const s = r.stats;
+            const lines = [];
+            const walk = (suite) => { for (const sp of suite.specs || []) for (const t of sp.tests)
+              for (const res of t.results.slice(-1)) lines.push(`| ${res.status === "passed" ? "passed" : res.status} | ${t.projectName} | ${sp.title.split(" @")[0].replace(/\|/g, "-")} | ${Math.round(res.duration / 1000)} s |`);
+              for (const child of suite.suites || []) walk(child); };
+            r.suites.forEach(walk);
+            console.log(`### E2E: ${s.expected} passed, ${s.unexpected} failed, ${s.flaky} flaky, ${s.skipped} skipped\n`);
+            console.log("| Result | Project | Test | Time |\n| --- | --- | --- | --- |\n" + lines.join("\n"));
+          ' "$PWD/$f" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-reports-${{ inputs.test_env }}-${{ github.run_number }}
+          path: |
+            reports/
+            test-results*/
+          retention-days: 14
+          if-no-files-found: ignore
